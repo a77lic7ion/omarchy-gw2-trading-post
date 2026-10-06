@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "shaun.gw2-trading-post",
+  "name": "GW2 Trading Post",
+  "version": "1.0.0",
+  "author": "Shaun Gordon",
+  "license": "MIT",
+  "description": "Shows Guild Wars 2 wallet gold and trading post listing values",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "GW2 Trading Post",
+    "description": "Wallet gold, sell listings value, buy orders value",
+    "category": "Custom",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  },
+  "keepLoaded": true
+}
