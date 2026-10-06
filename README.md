@@ -6,8 +6,6 @@ Plugin id: `shaun.gw2-trading-post`
 
 <img width="307" height="402" alt="image" src="https://github.com/user-attachments/assets/f9cd88ad-e9c3-4e92-9ddf-b01885219427" />
 
-<img width="307" height="402" alt="image" src="https://github.com/user-attachments/assets/cd328c19-7881-4981-b065-9196e8b9991d" />
-
 
 
 ## What it does
