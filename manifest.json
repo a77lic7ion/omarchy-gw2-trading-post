@@ -17,7 +17,27 @@
     "description": "Wallet gold, sell listings value, buy orders value",
     "category": "Custom",
     "allowMultiple": false,
-    "defaultSection": "right"
+    "defaultSection": "right",
+    "defaults": {
+      "apiToken": "",
+      "refreshMinutes": 15
+    },
+    "schema": [
+      {
+        "key": "apiToken",
+        "type": "string",
+        "label": "GW2 API key",
+        "description": "Guild Wars 2 API key with Account and Wallet permissions. Read first, ahead of $GW2_API_TOKEN and ~/.config/omarchy/gw2-api-token. Paste it in the panel's Settings view.",
+        "defaultValue": ""
+      },
+      {
+        "key": "refreshMinutes",
+        "type": "number",
+        "label": "Refresh interval (minutes)",
+        "description": "How often the wallet and Wizard's Vault dailies are re-fetched. Resets at 00:00 UTC happen regardless.",
+        "defaultValue": 15
+      }
+    ]
   },
   "keepLoaded": true
 }

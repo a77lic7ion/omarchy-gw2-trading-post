@@ -33,7 +33,6 @@ Panel {
   }
 
   Component.onCompleted: {
-    console.log("GW2 Panel Component.onCompleted")
     tokenFile.reload()
   }
 
@@ -42,6 +41,15 @@ Panel {
   property string errorMessage: ""
   property string lastUpdated: ""
   property int fetchStamp: 0
+
+  // Token entry. Lives in the panel so the bar's right-click stays a
+  // notification; the value is stored on this widget's shell.json entry.
+  property bool settingsOpen: false
+  property string settingsStatus: ""
+  readonly property var shellApi: root.bar && root.bar.shell ? root.bar.shell : null
+  readonly property string tokenSource: String(setting("apiToken", "")) !== "" ? "this panel"
+    : (root.envToken !== "" ? "$GW2_API_TOKEN"
+    : (root.fileToken !== "" ? "~/.config/omarchy/gw2-api-token" : "nothing yet"))
 
   // Wizard's Vault dailies
   property var dailyObjectives: []
@@ -57,7 +65,27 @@ Panel {
 
   readonly property string label: hasToken ? walletCompact : "GW2"
 
+  // The API key must never reach a command line: anything in argv is readable
+  // by other local users through /proc/<pid>/cmdline. curl is fed a config
+  // stream over stdin (`--config -`) instead, so the key stays out of its
+  // process arguments and out of the environment. Same pattern as Omarchy's
+  // own network panel, which sends the 802.1X password over stdin.
+  // The config format is line-oriented, so a stray newline or quote in the
+  // stored key is stripped rather than allowed to inject another directive.
+  readonly property string safeToken: String(root.apiToken).replace(/[\r\n"\\]/g, "")
+
+  readonly property string walletCurlConfig:
+    'url = "https://api.guildwars2.com/v2/account/wallet?_=' + root.fetchStamp + '"\n'
+    + 'header = "Authorization: Bearer ' + root.safeToken + '"\n'
+    + 'header = "Cache-Control: no-cache"\n'
+
+  readonly property string dailiesCurlConfig:
+    'url = "https://api.guildwars2.com/v2/account/wizardsvault/daily?_=' + root.fetchStamp + '"\n'
+    + 'header = "Authorization: Bearer ' + root.safeToken + '"\n'
+    + 'header = "Cache-Control: no-cache"\n'
+
   function open() {
+    settingsOpen = false
     root.controller.show()
     refresh()
   }
@@ -77,16 +105,97 @@ Panel {
     return false
   }
 
+  // ---- Settings ------------------------------------------------------------
+  // The token lives on this widget's shell.json entry, read first by the
+  // `apiToken` binding above. The shell patches the entry into the running
+  // widget in place, so a save takes effect without a remount.
+  function openSettings() {
+    settingsOpen = true
+    settingsStatus = ""
+    tokenField.text = String(setting("apiToken", ""))
+    Qt.callLater(function() {
+      tokenField.forceActiveFocus()
+      tokenField.selectAll()
+    })
+  }
+
+  function closeSettings() {
+    settingsOpen = false
+    settingsStatus = ""
+    keyCatcher.forceActiveFocus()
+  }
+
+  function persistToken(values) {
+    var entry = { id: moduleName }
+    var current = hostWidget && hostWidget.settings ? hostWidget.settings : (root.settings || {})
+    for (var k in current) if (k !== "id") entry[k] = current[k]
+    for (var key in values) entry[key] = values[key]
+    if (hostWidget && "settings" in hostWidget) hostWidget.settings = entry
+    if (root.shellApi && typeof root.shellApi.updateEntryInline === "function")
+      return root.shellApi.updateEntryInline(moduleName, entry) === true
+    return false
+  }
+
+  function saveToken() {
+    keyCatcher.forceActiveFocus()
+    var value = String(tokenField.text).trim()
+    if (value !== "" && (value.length < 30 || value.indexOf("-") === -1)) {
+      settingsStatus = "That does not look like a GW2 API key (they are long and hyphenated)."
+      return
+    }
+    var previous = String(setting("apiToken", ""))
+    if (value === previous) {
+      settingsStatus = value === "" ? "No change: still using " + tokenSource + "." : "No change."
+      return
+    }
+    var written = persistToken({ apiToken: value })
+    // Computed here rather than from tokenSource: the binding above only
+    // re-evaluates after this call returns.
+    var nextSource = value !== "" ? "this panel"
+      : (root.envToken !== "" ? "$GW2_API_TOKEN"
+      : (root.fileToken !== "" ? "~/.config/omarchy/gw2-api-token" : "nothing yet"))
+    settingsStatus = !written ? "Saved for this session only: the widget is not in the bar layout."
+      : value === "" ? "Cleared. Now using " + nextSource + "." : "Saved."
+    if (hasToken && !loading) refresh()
+  }
+
+  function clearToken() {
+    keyCatcher.forceActiveFocus()
+    tokenField.text = ""
+    saveToken()
+  }
+
+  function formFieldKey(event, input) {
+    if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+      saveToken()
+      event.accepted = true
+    } else if (event.key === Qt.Key_Escape) {
+      input.text = String(setting("apiToken", ""))
+      closeSettings()
+      event.accepted = true
+    } else if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+      keyCatcher.forceActiveFocus()
+      event.accepted = true
+    }
+  }
+
   function refresh() {
-    console.log("GW2 refresh() hasToken=" + hasToken + " stamp=" + fetchStamp + " walletRunning=" + walletProc.running + " dailiesRunning=" + dailiesProc.running)
     if (!hasToken) return
     loading = true
     errorMessage = ""
     dailiesError = ""
     // New stamp busts any intermediary cache so every refresh hits the API live
     fetchStamp = Date.now()
-    if (!walletProc.running) walletProc.running = true
-    if (!dailiesProc.running) dailiesProc.running = true
+    // Each run needs its stdin pipe reopened, because the previous run closed it
+    // to signal EOF to curl.
+    if (!walletProc.running) {
+      walletProc.stdinEnabled = true
+      walletProc.running = true
+    }
+    if (!dailiesProc.running) {
+      dailiesProc.stdinEnabled = true
+      dailiesProc.running = true
+    }
   }
 
   function msUntilNextUtcReset() {
@@ -97,7 +206,14 @@ Panel {
 
   Process {
     id: walletProc
-    command: ["curl", "-fsS", "--max-time", "10", "-H", "Cache-Control: no-cache", "https://api.guildwars2.com/v2/account/wallet?access_token=" + root.apiToken + "&_=" + root.fetchStamp]
+    command: ["curl", "-fsS", "--max-time", "10", "--config", "-"]
+    // The key is written to curl's stdin, then stdin is closed so curl sees EOF
+    // and starts the transfer. Nothing secret reaches argv.
+    stdinEnabled: true
+    onStarted: {
+      write(root.walletCurlConfig)
+      stdinEnabled = false
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -117,7 +233,12 @@ Panel {
   // Wizard's Vault dailies
   Process {
     id: dailiesProc
-    command: ["curl", "-fsS", "--max-time", "10", "-H", "Cache-Control: no-cache", "-H", "Authorization: Bearer " + root.apiToken, "https://api.guildwars2.com/v2/account/wizardsvault/daily?_=" + root.fetchStamp]
+    command: ["curl", "-fsS", "--max-time", "10", "--config", "-"]
+    stdinEnabled: true
+    onStarted: {
+      write(root.dailiesCurlConfig)
+      stdinEnabled = false
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -127,7 +248,6 @@ Panel {
         metaProgressComplete = parsed.metaProgressComplete
         dailiesLoaded = true
         loading = false
-        console.log("GW2 dailies: " + parsed.objectives.length + " PvE objectives, meta " + parsed.metaProgressCurrent + "/" + parsed.metaProgressComplete)
         // Fetch acclaim icon if not cached
         if (root.acclaimIconUrl === "") {
           acclaimIconProc.running = true
@@ -135,7 +255,6 @@ Panel {
       }
     }
     onExited: function(exitCode) {
-      console.log("GW2 dailies curl exit=" + exitCode)
       if (exitCode !== 0) {
         dailiesError = "Dailies unavailable"
         dailiesLoaded = true
@@ -202,18 +321,28 @@ Panel {
     centerOnBar: false
     focusTarget: keyCatcher
     contentWidth: Math.min(panel.fittedContentWidth(Style.space(300)), Style.space(320))
-    contentHeight: panel.fittedContentHeight(contentColumn.implicitHeight)
+    contentHeight: panel.fittedContentHeight(root.settingsOpen ? settingsColumn.implicitHeight : contentColumn.implicitHeight)
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      onCloseRequested: root.close()
-      onTabRequested: function(direction) { root.switchPanel(direction) }
-      onReturnRequested: root.refresh()
+      // While the token field has the keyboard every key goes to it, so
+      // Escape/Tab/Enter mean the field, not the panel.
+      blocked: tokenField.activeFocus
+      onCloseRequested: {
+        if (root.settingsOpen) root.closeSettings()
+        else root.close()
+      }
+      onTabRequested: function(direction) {
+        if (root.settingsOpen) return
+        root.switchPanel(direction)
+      }
+      onReturnRequested: root.settingsOpen ? root.saveToken() : root.refresh()
     }
 
     Column {
       id: contentColumn
+      visible: !root.settingsOpen
       width: Math.min(parent.width, Style.space(300))
       spacing: Style.space(8)
 
@@ -410,21 +539,25 @@ Panel {
       // Status row
       Item {
         width: contentColumn.width
-        height: Math.max(statusText.implicitHeight, refreshBtn.implicitHeight)
+        height: Math.max(statusText.implicitHeight, refreshBtn.implicitHeight, settingsBtn.implicitHeight)
 
         Row {
           anchors.fill: parent
-          spacing: Style.space(10)
+          spacing: Style.space(8)
 
           Text {
             id: statusText
             visible: root.errorMessage !== "" || root.loading || root.lastUpdated !== ""
+            // Constrained to what the two buttons leave, so a long error
+            // truncates instead of pushing Settings out of the panel.
+            width: Math.max(0, parent.width - refreshBtn.implicitWidth - settingsBtn.implicitWidth - 2 * Style.space(8))
             textFormat: Text.PlainText
             text: root.errorMessage !== "" ? root.errorMessage : (root.loading ? "Synchronizing..." : "Updated: " + root.lastUpdated)
             color: root.errorMessage !== "" ? "#FF4A4A" : "#8C8E96"
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.bodySmall
             font.italic: root.loading
+            elide: Text.ElideRight
             anchors.verticalCenter: parent.verticalCenter
           }
 
@@ -440,18 +573,186 @@ Panel {
             bordered: true
             onClicked: root.refresh()
           }
+
+          Button {
+            id: settingsBtn
+            text: "Settings"
+            fontSize: Style.font.bodySmall
+            foreground: "#9A9B9F"
+            fontFamily: root.bar.fontFamily
+            horizontalPadding: Style.spacing.controlPaddingX
+            verticalPadding: Style.spacing.controlPaddingY
+            bordered: true
+            onClicked: root.openSettings()
+          }
+        }
+      }
+
+      Rectangle {
+        width: contentColumn.width
+        height: noTokenText.implicitHeight + Style.space(10)
+        color: "#1D1811"
+        border.color: "#4A3A22"
+        border.width: 1
+        visible: !root.hasToken
+
+        Text {
+          id: noTokenText
+          anchors.fill: parent
+          anchors.margins: Style.space(5)
+          textFormat: Text.PlainText
+          text: "⚠️ No API token. Open Settings and paste your GW2 API key."
+          color: "#D97736"
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          wrapMode: Text.Wrap
+        }
+
+        MouseArea {
+          anchors.fill: parent
+          cursorShape: Qt.PointingHandCursor
+          onClicked: root.openSettings()
+        }
+      }
+    }
+
+    // ---- Settings view -----------------------------------------------------
+    // Own column so the panel's look stays as it is; contentHeight above
+    // follows whichever column is showing.
+    Column {
+      id: settingsColumn
+      visible: root.settingsOpen
+      width: Math.min(parent.width, Style.space(300))
+      spacing: Style.space(8)
+
+      // Compact header, same shape as the main one, with a back affordance.
+      Rectangle {
+        width: settingsColumn.width
+        height: 28
+        color: "#141518"
+        border.color: "#3A352A"
+        border.width: 1
+
+        Row {
+          anchors.centerIn: parent
+          spacing: Style.space(6)
+
+          Text {
+            text: "‹"
+            font.pixelSize: 14
+            color: "#9A9B9F"
+            anchors.verticalCenter: parent.verticalCenter
+          }
+          Text {
+            text: "SETTINGS"
+            color: "#E6C267"
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            font.letterSpacing: 1
+            anchors.verticalCenter: parent.verticalCenter
+          }
+        }
+
+        MouseArea {
+          anchors.fill: parent
+          cursorShape: Qt.PointingHandCursor
+          onClicked: root.closeSettings()
         }
       }
 
       Text {
-        visible: !root.hasToken
-        width: contentColumn.width
+        width: settingsColumn.width
         textFormat: Text.PlainText
-        text: "⚠️ No API token. Right-click bar icon → Settings to add GW2 token."
-        color: "#D97736"
+        text: "Paste a Guild Wars 2 API key with \"Account\" and \"Wallet\" permissions. Saved on this widget in shell.json, so the panel and bar both pick it up at once."
+        color: "#9A9B9F"
+        font.family: root.bar.fontFamily
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.Wrap
+      }
+
+      Text {
+        width: settingsColumn.width
+        textFormat: Text.PlainText
+        text: "Currently using: " + root.tokenSource
+        color: root.hasToken ? "#8C8E96" : "#D97736"
+        font.family: root.bar.fontFamily
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.Wrap
+      }
+
+      TextField {
+        id: tokenField
+        width: settingsColumn.width
+        password: true
+        placeholderText: "0ABC-1234-..."
+        foreground: "#E6C267"
+        accent: "#E6C267"
         font.family: root.bar.fontFamily
         font.pixelSize: Style.font.bodySmall
-        wrapMode: Text.WrapAnywhere
+        horizontalPadding: Style.space(8)
+        verticalPadding: Style.space(6)
+        Keys.onPressed: function(event) { root.formFieldKey(event, tokenField) }
+      }
+
+      Text {
+        visible: root.settingsStatus !== ""
+        width: settingsColumn.width
+        textFormat: Text.PlainText
+        text: root.settingsStatus
+        color: root.hasToken ? "#9A9B9F" : "#D97736"
+        font.family: root.bar.fontFamily
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.Wrap
+      }
+
+      Row {
+        spacing: Style.space(8)
+
+        Button {
+          id: saveBtn
+          text: "Save"
+          enabled: tokenField.text.trim() !== ""
+          fontSize: Style.font.bodySmall
+          foreground: "#E6C267"
+          fontFamily: root.bar.fontFamily
+          horizontalPadding: Style.spacing.controlPaddingX
+          verticalPadding: Style.spacing.controlPaddingY
+          bordered: true
+          onClicked: root.saveToken()
+        }
+
+        Button {
+          id: clearBtn
+          text: "Clear"
+          fontSize: Style.font.bodySmall
+          foreground: "#9A9B9F"
+          fontFamily: root.bar.fontFamily
+          horizontalPadding: Style.spacing.controlPaddingX
+          verticalPadding: Style.spacing.controlPaddingY
+          bordered: true
+          onClicked: root.clearToken()
+        }
+
+        Button {
+          text: "Back"
+          fontSize: Style.font.bodySmall
+          foreground: "#9A9B9F"
+          fontFamily: root.bar.fontFamily
+          horizontalPadding: Style.spacing.controlPaddingX
+          verticalPadding: Style.spacing.controlPaddingY
+          onClicked: root.closeSettings()
+        }
+      }
+
+      Text {
+        width: settingsColumn.width
+        textFormat: Text.PlainText
+        text: "Esc reverts and goes back. Enter saves."
+        color: "#8C8E96"
+        font.family: root.bar.fontFamily
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.Wrap
       }
     }
   }

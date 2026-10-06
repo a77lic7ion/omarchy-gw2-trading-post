@@ -19,17 +19,32 @@ Plugin id: `shaun.gw2-trading-post`
 ## Requirements
 
 - Omarchy with the Quattro shell
-- A GW2 API token (free from [account.arena.net](https://account.arena.net/applications))
+- A GW2 API token (free from [account.arena.net](https://account.arena.net/applications)) with the **Account** and **Wallet** permissions
 
-## API Token Setup
+## API token setup
 
-The plugin reads your GW2 API token from **one of three places** (in order of priority):
+Open the panel and press **Settings**, then paste your key. It is stored on this
+widget's entry in `shell.json` and takes effect immediately.
 
-1. **Plugin settings** — right-click the bar icon → Settings → enter your token
-2. **Environment variable** — set `GW2_API_TOKEN` in your shell environment
-3. **Token file** — write your token to `~/.config/omarchy/gw2-api-token`
+The plugin reads the key from the first of these that is set:
 
-No token is hardcoded in the plugin. You provide your own.
+1. **The panel's Settings view** — click the bar icon, then **Settings**
+2. **Environment variable** — `GW2_API_TOKEN`
+3. **Token file** — `~/.config/omarchy/gw2-api-token`
+
+No key is hardcoded in the plugin; you supply your own.
+
+### How the key is handled
+
+- It is **never passed on a command line**. Anything in a process's arguments is
+  readable by other local users through `/proc/<pid>/cmdline`, so `curl` is fed a
+  config stream on its stdin instead (`--config -`), and the key is closed over as
+  soon as it has been written. Omarchy's own network panel uses the same
+  stdin-not-argv approach for the 802.1X password.
+- It is stored with the rest of your shell configuration at
+  `~/.config/omarchy/shell.json`, which is mode `0600` — the same file and the same
+  protection Omarchy already gives your other widget settings.
+- It is sent only to `api.guildwars2.com`, only over HTTPS.
 
 ## Install
 
@@ -43,9 +58,13 @@ omarchy plugin add https://github.com/a77lic7ion/omarchy-gw2-trading-post.git --
 | --- | --- |
 | Open the panel | Click the bar icon |
 | Close the panel | `Escape`, or click the icon again |
+| Add or change your key | Open the panel, then **Settings** |
 | Force refresh | Middle-click the bar icon |
 | Wallet notification | Right-click the bar icon |
 | From a keybind | `omarchy-shell shell summon shaun.gw2-trading-post '{}'` |
+
+In the Settings view: **Enter** saves, **Escape** reverts and returns to the panel,
+**Clear** removes the stored key and falls back to the environment variable or file.
 
 ## Remove
 
@@ -53,15 +72,21 @@ omarchy plugin add https://github.com/a77lic7ion/omarchy-gw2-trading-post.git --
 omarchy plugin remove shaun.gw2-trading-post
 ```
 
-Removal leaves no cache or config files behind.
+Removal leaves no cache or config files behind. If you saved a key, delete its
+`apiToken` entry from `~/.config/omarchy/shell.json`, or clear it from the Settings
+view before removing the plugin.
 
 ## Notes on what it touches
 
-- **Network**: reads `https://api.guildwars2.com/v2/account/wallet`, `https://api.guildwars2.com/v2/account/wizardsvault/daily`, and `https://api.guildwars2.com/v2/currencies/63` with your token
-- **Files read**: `~/.config/omarchy/gw2-api-token` (if present)
-- **Files written**: none
-- **Commands run**: `curl` (read-only GET requests to the GW2 API)
-- **No privileged commands, no config overwriting, no telemetry**
+- **Network**: reads `https://api.guildwars2.com/v2/account/wallet`,
+  `https://api.guildwars2.com/v2/account/wizardsvault/daily` and
+  `https://api.guildwars2.com/v2/currencies/63` with your key
+- **Files read**: `~/.config/omarchy/shell.json` (your widget settings),
+  `~/.config/omarchy/gw2-api-token` (if present)
+- **Files written**: `~/.config/omarchy/shell.json`, only when you save or clear a
+  key in the Settings view
+- **Commands run**: `curl`, read-only GET requests to the GW2 API. No privileged
+  commands, no other configuration is touched, no telemetry
 
 ## License
 
